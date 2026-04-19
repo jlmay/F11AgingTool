@@ -1,0 +1,12 @@
+# 统一行尾处理
+* text=auto
+
+# Gradle wrapper 脚本保持 LF（Unix 换行，避免 sh 执行错误）
+gradlew text eol=lf
+
+# 二进制文件不转换
+*.aar binary
+*.jar binary
+*.webp binary
+*.png binary
+*.pdf binary
