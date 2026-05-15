@@ -104,6 +104,7 @@ class MainActivity : AppCompatActivity() {
     private val PREF_CB_ETHERNET = "auto_cb_ethernet"
     private val PREF_CB_BARCODE = "auto_cb_barcode"
     private val PREF_BARCODE_REF = "auto_barcode_ref"
+    private val PREF_LOG_FILE = "auto_log_file"     // 日志文件绝对路径
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -187,6 +188,7 @@ class MainActivity : AppCompatActivity() {
             putBoolean(PREF_CB_ETHERNET, cbEthernet.isChecked)
             putBoolean(PREF_CB_BARCODE, cbBarcode.isChecked)
             putString(PREF_BARCODE_REF, etBarcodeRef.text.toString())
+            putString(PREF_LOG_FILE, currentLogFile?.absolutePath ?: "")
             apply()
         }
     }
@@ -195,6 +197,7 @@ class MainActivity : AppCompatActivity() {
     private fun clearAutoState() {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putBoolean(PREF_AUTO_MODE, false)
+            .putString(PREF_LOG_FILE, "")
             .apply()
     }
 
@@ -223,6 +226,15 @@ class MainActivity : AppCompatActivity() {
         successCount = prefs.getInt(PREF_SUCCESS, 0)
         failCount = prefs.getInt(PREF_FAIL, 0)
 
+        // 恢复日志文件（继续写入同一个文件）
+        val savedLogPath = prefs.getString(PREF_LOG_FILE, "")
+        if (!savedLogPath.isNullOrBlank()) {
+            val savedFile = File(savedLogPath)
+            if (savedFile.parentFile?.exists() == true) {
+                currentLogFile = savedFile
+            }
+        }
+
         // 恢复 UI 配置
         if (runMode == 2) rbModeReboot.isChecked else rbModeNormal.isChecked
         etTotalCount.setText(total.toString())
@@ -248,9 +260,13 @@ class MainActivity : AppCompatActivity() {
     private fun resumeTesting(remaining: Int, total: Int, runMode: Int) {
         if (isRunning.get()) return
 
-        val ts = sdfFile.format(Date())
-        currentLogFile = File(logDir, "aging_${ts}.txt")
-        appendLog("====== 恢复测试 [$ts] ======")
+        // 如果没有已保存的日志文件（断电导致文件丢失等），才创建新文件
+        if (currentLogFile == null || !currentLogFile!!.exists()) {
+            val ts = sdfFile.format(Date())
+            currentLogFile = File(logDir, "aging_${ts}.txt")
+        }
+        val ts = sdf.format(Date())
+        appendLog("\n====== 恢复测试 [$ts] ======")
 
         isRunning.set(true)
         setUIRunning(true)
