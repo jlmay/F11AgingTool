@@ -13,11 +13,17 @@
     <!-- USB 读卡器 -->
     <uses-feature android:name="android.hardware.usb.host" />
 
-    <!-- 开机自启动权限（模式3） -->
+    <!-- 开机自启动权限（模式1断电恢复 + 模式2每轮重启） -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- 重启权限（模式2，需系统签名或 root） -->
-    <uses-permission android:name="android.permission.REBOOT" />
+    <!-- 前台服务权限（AutoStartService 开机自启需要） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!-- 显示在其他应用上层（Android 10+ 后台启动 Activity 必需） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Android 14+ 全屏通知权限（开机自启拉起 Activity 需要） -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <application
         android:allowBackup="true"
@@ -40,7 +46,7 @@
             </intent-filter>
         </activity>
 
-        <!-- 开机自启动广播接收器（模式3） -->
+        <!-- 开机自启动广播接收器 -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true"
@@ -50,6 +56,25 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
+
+        <!-- 设备管理员接收器（支持 DevicePolicyManager.reboot()） -->
+        <receiver
+            android:name=".DeviceAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_policies" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 开机自启动前台服务（Android 10+ 后台启动 Activity 限制的中间层） -->
+        <service
+            android:name=".AutoStartService"
+            android:exported="false"
+            android:enabled="true" />
 
     </application>
 

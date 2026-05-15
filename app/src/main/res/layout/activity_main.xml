@@ -62,20 +62,14 @@
                     android:id="@+id/rbModeNormal"
                     android:layout_width="match_parent"
                     android:layout_height="40dp"
-                    android:text="模式1：不断电循环测试"
+                    android:text="模式1：不断电循环（断电自动恢复）"
                     android:textSize="14sp"
                     android:checked="true" />
                 <RadioButton
                     android:id="@+id/rbModeReboot"
                     android:layout_width="match_parent"
                     android:layout_height="40dp"
-                    android:text="模式2：每次测试后重启"
-                    android:textSize="14sp" />
-                <RadioButton
-                    android:id="@+id/rbModeAuto"
-                    android:layout_width="match_parent"
-                    android:layout_height="40dp"
-                    android:text="模式3：开机自动运行"
+                    android:text="模式2：每轮测试后重启"
                     android:textSize="14sp" />
             </RadioGroup>
 
@@ -379,6 +373,33 @@
 
         </LinearLayout>
     </ScrollView>
+
+    <!-- ===== 网络信息固定显示区（独立于日志） ===== -->
+    <LinearLayout
+        android:id="@+id/layoutNetworkInfo"
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:orientation="horizontal"
+        android:background="#FFF3E0"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="16dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="IP: "
+            android:textSize="13sp"
+            android:textColor="#F57C00" />
+
+        <TextView
+            android:id="@+id/tvIpAddress"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="--"
+            android:textSize="13sp"
+            android:textColor="#BF360C" />
+    </LinearLayout>
 
     <!-- ===== 实时日志区 ===== -->
     <LinearLayout

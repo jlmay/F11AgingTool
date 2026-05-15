@@ -1,5 +1,17 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
 plugins {
     alias(libs.plugins.android.application)
+}
+
+// 获取当前编译时间（UTC+8）
+fun getBuildTime(): String {
+    val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
+    sdf.timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+    return sdf.format(Date())
 }
 
 android {
@@ -18,6 +30,13 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 编译时间戳：格式 YYYYMMDD_HHmmss
+        buildConfigField("String", "BUILD_TIME", "\"${getBuildTime()}\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {
