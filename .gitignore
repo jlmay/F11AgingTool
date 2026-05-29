@@ -35,3 +35,6 @@ read_pdf*.py
 
 # WorkBuddy 工作目录（AI 辅助文件，不需要提交）
 .workbuddy/
+
+# 参考文档
+ref/

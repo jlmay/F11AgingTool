@@ -13,6 +13,7 @@ import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.decard.NDKMethod.BasicOper
+// IDCard 类来自 dc_reader_release_20260302133638.aar 中的 com.decard.entitys 包
 import com.decard.entitys.IDCard
 import java.io.File
 import java.net.InetAddress
@@ -507,49 +508,132 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { /* ignore */ }
     }
 
+    /**
+     * 身份证读取：使用 SDK 封装的 IDCard 对象方式
+     */
     private fun testIdCard(): Boolean {
-        return try {
-            if (devHandle <= 0) return false
-            val idCard: IDCard? = BasicOper.dc_IdCardReadCardInfo(1)
-            if (idCard == null) return false
-            val name = idCard.name ?: ""
-            val id = idCard.id ?: ""
-            val ok = name.isNotBlank() && id.isNotBlank()
-            if (ok) appendLog("  姓名: $name | 身份证号: $id")
-            else appendLog("  身份证信息为空: name=$name, id=$id")
-            ok
+        if (devHandle <= 0) return false
+
+        // 1. 读取身份证序列号
+        try {
+            val idSnr = BasicOper.dc_get_idsnr()
+            val idSnrParts = idSnr?.split("\\|".toRegex())
+            if (idSnrParts == null || idSnrParts.size < 2 || idSnrParts[0] != "0000") {
+                appendLog("  取序列号失败: $idSnr")
+                return false
+            }
+            appendLog("  身份证序列号: ${idSnrParts[1]}")
         } catch (e: Exception) {
-            appendLog("  身份证测试异常: ${e.message}")
-            false
+            appendLog("  取序列号异常: ${e.message}")
+            return false
+        }
+
+        // 2. 读取身份证信息（SDK 封装方式）
+        try {
+            val idCard: IDCard? = BasicOper.dc_SamAReadCardInfo(1)
+            if (idCard == null) {
+                appendLog("  读身份证失败")
+                return false
+            }
+            val name = idCard.name?.trim() ?: ""
+            val idNum = idCard.id?.trim() ?: ""
+            if (name.isBlank() || idNum.isBlank()) {
+                appendLog("  身份证信息不完整: name='$name' id='$idNum'")
+                return false
+            }
+            appendLog("  姓名: $name | 身份证号: $idNum")
+            return true
+        } catch (e: Exception) {
+            appendLog("  读身份证异常: ${e.message}")
+            return false
         }
     }
 
     private fun testContactlessCard(): Boolean {
-        return try {
-            if (devHandle <= 0) return false
-            val findRet = BasicOper.dc_card_hex(0x01)
-            if (findRet.isNullOrBlank() || isError(findRet)) {
+        if (devHandle <= 0) {
+            appendLog("  devHandle <= 0")
+            return false
+        }
+
+        var allOk = true
+
+        // 1. 配置卡类型（Type A），失败不阻断（部分设备不需要此步）
+        try {
+            val configRet = BasicOper.dc_config_card(0x00)
+            val configParts = configRet?.split("\\|".toRegex())
+            if (configParts != null && configParts.size >= 2) {
+                if (configParts[0] == "0000") {
+                    appendLog("  dc_config_card: OK")
+                } else {
+                    appendLog("  dc_config_card: ${configParts[0]} (非致命，继续)")
+                }
+            }
+        } catch (e: Exception) {
+            appendLog("  dc_config_card 异常(非致命): ${e.message}")
+        }
+
+        // 2. 射频复位
+        try {
+            val resetRf = BasicOper.dc_reset()
+            val resetRfParts = resetRf?.split("\\|".toRegex())
+            if (resetRfParts == null || resetRfParts.size < 2 || resetRfParts[0] != "0000") {
+                appendLog("  射频复位失败: $resetRf")
+                return false
+            }
+        } catch (e: Exception) {
+            appendLog("  dc_reset 异常: ${e.message}")
+            return false
+        }
+
+        // 3. 寻卡（Type A）
+        try {
+            val findRet = BasicOper.dc_card_n_hex(0x01)
+            val parts = findRet?.split("\\|".toRegex())
+            if (parts == null || parts.size < 2 || parts[0] != "0000") {
                 appendLog("  寻卡失败: $findRet")
                 return false
             }
-            appendLog("  寻卡: $findRet")
-            val resetRet = BasicOper.dc_pro_resethex()
-            if (resetRet.isNullOrBlank() || isError(resetRet)) {
+            appendLog("  寻卡成功: ${parts[1]}")
+        } catch (e: Exception) {
+            appendLog("  寻卡异常: ${e.message}")
+            return false
+        }
+
+        // 4. 非接触CPU卡复位
+        try {
+            val resetRet = BasicOper.dc_pro_resetInt_hex()
+            val resetParts = resetRet?.split("\\|".toRegex())
+            if (resetParts == null || resetParts.size < 2 || resetParts[0] != "0000") {
                 appendLog("  复位失败: $resetRet")
                 return false
             }
-            appendLog("  复位ATR: $resetRet")
-            val randRet = BasicOper.dc_procommandInt_hex("0084000008", 7)
-            if (randRet.isNullOrBlank() || isError(randRet)) {
-                appendLog("  取随机数失败: $randRet")
-                return false
-            }
-            appendLog("  随机数: $randRet")
-            true
+            appendLog("  复位ATR: ${resetParts[1]}")
         } catch (e: Exception) {
-            appendLog("  非接触CPU卡测试异常: ${e.message}")
-            false
+            appendLog("  复位异常: ${e.message}")
+            return false
         }
+
+        // 5. 发送APDU取随机数
+        try {
+            val randRet = BasicOper.dc_procommandInt_hex("0084000008", 7)
+            val randParts = randRet?.split("\\|".toRegex())
+            if (randParts == null || randParts.size < 2 || randParts[0] != "0000") {
+                appendLog("  取随机数失败: $randRet")
+                allOk = false
+            } else {
+                appendLog("  随机数: ${randParts[1]}")
+            }
+        } catch (e: Exception) {
+            appendLog("  APDU异常: ${e.message}")
+            allOk = false
+        }
+
+        // 6. 下电（释放卡片，避免下轮寻卡冲突）
+        try {
+            BasicOper.dc_pro_halt()
+        } catch (_: Exception) {}
+
+        return allOk
     }
 
     private fun testContactCard(): Boolean {
