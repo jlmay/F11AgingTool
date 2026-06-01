@@ -69,6 +69,10 @@ class MainActivity : AppCompatActivity() {
     private val executor = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
 
+    // 暂停/继续
+    private val isPaused = AtomicBoolean(false)
+    private val pauseLock = Object()
+
     // 日志轮次缓冲（最近 10 轮日志，独立于文件写入）
     private val logRoundBuffers = mutableListOf<String>()
     private var currentRoundBuffer = StringBuilder()
@@ -155,7 +159,13 @@ class MainActivity : AppCompatActivity() {
             layoutBarcodeInput.visibility = if (checked) View.VISIBLE else View.GONE
         }
 
-        btnStart.setOnClickListener { startTesting() }
+        btnStart.setOnClickListener {
+            when {
+                !isRunning.get() -> startTesting()
+                isPaused.get() -> resumeFromPause()
+                else -> pauseTesting()
+            }
+        }
         btnStop.setOnClickListener { stopTesting() }
         btnViewLog.setOnClickListener { viewLogs() }
         btnClearLog.setOnClickListener {
@@ -210,7 +220,7 @@ class MainActivity : AppCompatActivity() {
         val remaining = prefs.getInt(PREF_REMAINING, 0)
         val total = prefs.getInt(PREF_TOTAL, 0)
         val runMode = prefs.getInt(PREF_RUN_MODE, 1)
-        val delay = prefs.getInt(PREF_DELAY, 0)
+        val delay = prefs.getInt(PREF_DELAY, 1000)
 
         // 剩余为0，任务已完成
         if (remaining <= 0) {
@@ -241,7 +251,7 @@ class MainActivity : AppCompatActivity() {
         etTotalCount.setText(total.toString())
         etStartDelay.setText(delay.toString())
         cbIdCard.isChecked = prefs.getBoolean(PREF_CB_IDCARD, true)
-        cbContactlessCard.isChecked = prefs.getBoolean(PREF_CB_CONTACTLESS, true)
+        cbContactlessCard.isChecked = prefs.getBoolean(PREF_CB_CONTACTLESS, false)
         cbContactCard.isChecked = prefs.getBoolean(PREF_CB_CONTACT, false)
         cbEthernet.isChecked = prefs.getBoolean(PREF_CB_ETHERNET, true)
         cbBarcode.isChecked = prefs.getBoolean(PREF_CB_BARCODE, false)
@@ -254,11 +264,11 @@ class MainActivity : AppCompatActivity() {
         tvTotalCount.text = total.toString()
 
         // 延时后继续测试
-        handler.postDelayed({ resumeTesting(remaining, total, runMode) }, delay.toLong())
+        handler.postDelayed({ resumeFromBoot(remaining, total, runMode) }, delay.toLong())
     }
 
     /** 开机恢复后继续测试 */
-    private fun resumeTesting(remaining: Int, total: Int, runMode: Int) {
+    private fun resumeFromBoot(remaining: Int, total: Int, runMode: Int) {
         if (isRunning.get()) return
 
         // 如果没有已保存的日志文件（断电导致文件丢失等），才创建新文件
@@ -277,7 +287,7 @@ class MainActivity : AppCompatActivity() {
         val delay = etStartDelay.text.toString().toLongOrNull() ?: 0L
         executor.submit {
             if (delay > 0) {
-                appendLog("等待启动延时 ${delay}ms ...")
+                appendLogScreen("等待启动延时 ${delay}ms ...")
                 Thread.sleep(delay)
             }
             continueTestLoop(remaining, total, runMode)
@@ -333,6 +343,14 @@ class MainActivity : AppCompatActivity() {
         currentLogFile = File(logDir, "aging_${ts}.txt")
         appendLog("====== 测试开始 [$ts] ======")
         appendLog("总次数=$total | 模式=${getModeName()} | 延时=${etStartDelay.text}ms")
+        val items = buildString {
+            if (cbIdCard.isChecked) append(" ①身份证")
+            if (cbContactlessCard.isChecked) append(" ②非接触CPU")
+            if (cbContactCard.isChecked) append(" ③接触CPU")
+            if (cbEthernet.isChecked) append(" ④以太网")
+            if (cbBarcode.isChecked) append(" ⑤扫码")
+        }
+        appendLog("测试项目:$items")
 
         isRunning.set(true)
         setUIRunning(true)
@@ -342,7 +360,7 @@ class MainActivity : AppCompatActivity() {
         val delay = etStartDelay.text.toString().toLongOrNull() ?: 0L
         executor.submit {
             if (delay > 0) {
-                appendLog("等待启动延时 ${delay}ms ...")
+                appendLogScreen("等待启动延时 ${delay}ms ...")
                 Thread.sleep(delay)
             }
             if (isRebootMode) {
@@ -357,6 +375,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopTesting() {
         isRunning.set(false)
+        isPaused.set(false)
+        synchronized(pauseLock) { pauseLock.notifyAll() }
         clearAutoState()
         appendLog("====== 测试已手动停止 ======")
         handler.post {
@@ -365,13 +385,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun pauseTesting() {
+        isPaused.set(true)
+        appendLogScreen("====== 用户暂停测试 ======")
+        handler.post {
+            btnStart.text = "继续测试"
+            btnStart.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                android.graphics.Color.parseColor("#FF8F00"))
+            tvStatus.text = "● 已暂停"
+            tvStatus.setTextColor(0xFFFF8F00.toInt())
+        }
+    }
+
+    private fun resumeFromPause() {
+        isPaused.set(false)
+        synchronized(pauseLock) { pauseLock.notifyAll() }
+        appendLogScreen("====== 用户恢复测试 ======")
+        handler.post {
+            btnStart.text = "暂停测试"
+            btnStart.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                android.graphics.Color.parseColor("#1565C0"))
+            tvStatus.text = "● 测试中"
+            tvStatus.setTextColor(0xFFFF8F00.toInt())
+        }
+    }
+
     // ── 模式1：不断电循环 ─────────────────────────────────────
     private fun runTestLoop(total: Int, runMode: Int) {
         val startIndex = currentCount + 1
 
         for (i in startIndex..total) {
+            checkPause()
             if (!isRunning.get()) break
-            appendLog("\n─── 第 $i / $total 轮 ───")
+            appendLogScreen("\n─── 第 $i / $total 轮 ───")
             val result = runOnce()
             currentCount = i
             if (result) successCount++ else failCount++
@@ -398,9 +444,10 @@ class MainActivity : AppCompatActivity() {
      * @param remaining   剩余次数（含本轮）
      */
     private fun runSingleRoundAndReboot(roundIndex: Int, remaining: Int) {
+        checkPause()
         if (!isRunning.get()) return
 
-        appendLog("\n─── 第 $roundIndex 轮 ───")
+        appendLogScreen("\n─── 第 $roundIndex 轮 ───")
         val result = runOnce()
         currentCount = roundIndex
         if (result) successCount++ else failCount++
@@ -431,7 +478,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 还有剩余次数，重启继续
-        appendLog("[模式2] 本轮完成，剩余 $newRemaining 次，准备重启系统...")
+        appendLogScreen("[模式2] 本轮完成，剩余 $newRemaining 次，准备重启系统...")
         closeReader()
         Thread.sleep(2000)
         rebootDevice()
@@ -455,31 +502,35 @@ class MainActivity : AppCompatActivity() {
 
         if (getCheckedFlag(cbIdCard)) {
             val ok = testIdCard()
-            appendLog("身份证: ${if (ok) "✓ 成功" else "✗ 失败"}")
+            if (ok) appendLogScreen("身份证: ✓ 成功") else appendLog("身份证: ✗ 失败")
             if (!ok) allOk = false
         }
+        checkPause()
         if (getCheckedFlag(cbContactlessCard)) {
             val ok = testContactlessCard()
-            appendLog("非接触CPU卡: ${if (ok) "✓ 成功" else "✗ 失败"}")
+            if (ok) appendLogScreen("非接触CPU卡: ✓ 成功") else appendLog("非接触CPU卡: ✗ 失败")
             if (!ok) allOk = false
         }
+        checkPause()
         if (getCheckedFlag(cbContactCard)) {
             val ok = testContactCard()
-            appendLog("接触CPU卡: ${if (ok) "✓ 成功" else "✗ 失败"}")
+            if (ok) appendLogScreen("接触CPU卡: ✓ 成功") else appendLog("接触CPU卡: ✗ 失败")
             if (!ok) allOk = false
         }
+        checkPause()
         if (getCheckedFlag(cbEthernet)) {
             val ok = testEthernet()
-            appendLog("以太网PING: ${if (ok) "✓ 成功" else "✗ 失败"}")
+            if (ok) appendLogScreen("以太网PING: ✓ 成功") else appendLog("以太网PING: ✗ 失败")
             if (!ok) allOk = false
         }
+        checkPause()
         if (getCheckedFlag(cbBarcode)) {
             val ok = testBarcode()
-            appendLog("扫码: ${if (ok) "✓ 成功" else "✗ 失败"}")
+            if (ok) appendLogScreen("扫码: ✓ 成功") else appendLog("扫码: ✗ 失败")
             if (!ok) allOk = false
         }
 
-        appendLog("本轮结果: ${if (allOk) "【全部成功】" else "【有失败项】"}")
+        if (allOk) appendLogScreen("本轮结果: 【全部成功】") else appendLog("本轮结果: 【有失败项】")
         return allOk
     }
 
@@ -491,9 +542,9 @@ class MainActivity : AppCompatActivity() {
             BasicOper.dc_AUSB_ReqPermission(this)
             Thread.sleep(500)
             devHandle = BasicOper.dc_open("AUSB", this, "", 0)
-            appendLog("读卡器打开: ${if (devHandle > 0) "成功(handle=$devHandle)" else "失败(code=$devHandle)"}")
+            appendLogScreen("读卡器打开: ${if (devHandle > 0) "成功(handle=$devHandle)" else "失败(code=$devHandle)"}")
         } catch (e: Exception) {
-            appendLog("读卡器打开异常: ${e.message}")
+            appendLogScreen("读卡器打开异常: ${e.message}")
         }
     }
 
@@ -503,7 +554,7 @@ class MainActivity : AppCompatActivity() {
             if (devHandle > 0) {
                 BasicOper.dc_exit()
                 devHandle = -1
-                appendLog("读卡器已关闭")
+                appendLogScreen("读卡器已关闭")
             }
         } catch (e: Exception) { /* ignore */ }
     }
@@ -522,7 +573,7 @@ class MainActivity : AppCompatActivity() {
                 appendLog("  取序列号失败: $idSnr")
                 return false
             }
-            appendLog("  身份证序列号: ${idSnrParts[1]}")
+            appendLogScreen("  身份证序列号: ${idSnrParts[1]}")
         } catch (e: Exception) {
             appendLog("  取序列号异常: ${e.message}")
             return false
@@ -541,7 +592,7 @@ class MainActivity : AppCompatActivity() {
                 appendLog("  身份证信息不完整: name='$name' id='$idNum'")
                 return false
             }
-            appendLog("  姓名: $name | 身份证号: $idNum")
+            appendLogScreen("  姓名: $name | 身份证号: $idNum")
             return true
         } catch (e: Exception) {
             appendLog("  读身份证异常: ${e.message}")
@@ -563,13 +614,13 @@ class MainActivity : AppCompatActivity() {
             val configParts = configRet?.split("\\|".toRegex())
             if (configParts != null && configParts.size >= 2) {
                 if (configParts[0] == "0000") {
-                    appendLog("  dc_config_card: OK")
+                    appendLogScreen("  dc_config_card: OK")
                 } else {
-                    appendLog("  dc_config_card: ${configParts[0]} (非致命，继续)")
+                    appendLogScreen("  dc_config_card: ${configParts[0]} (非致命，继续)")
                 }
             }
         } catch (e: Exception) {
-            appendLog("  dc_config_card 异常(非致命): ${e.message}")
+            appendLogScreen("  dc_config_card 异常(非致命): ${e.message}")
         }
 
         // 2. 射频复位
@@ -593,7 +644,7 @@ class MainActivity : AppCompatActivity() {
                 appendLog("  寻卡失败: $findRet")
                 return false
             }
-            appendLog("  寻卡成功: ${parts[1]}")
+            appendLogScreen("  寻卡成功: ${parts[1]}")
         } catch (e: Exception) {
             appendLog("  寻卡异常: ${e.message}")
             return false
@@ -607,7 +658,7 @@ class MainActivity : AppCompatActivity() {
                 appendLog("  复位失败: $resetRet")
                 return false
             }
-            appendLog("  复位ATR: ${resetParts[1]}")
+            appendLogScreen("  复位ATR: ${resetParts[1]}")
         } catch (e: Exception) {
             appendLog("  复位异常: ${e.message}")
             return false
@@ -621,7 +672,7 @@ class MainActivity : AppCompatActivity() {
                 appendLog("  取随机数失败: $randRet")
                 allOk = false
             } else {
-                appendLog("  随机数: ${randParts[1]}")
+                appendLogScreen("  随机数: ${randParts[1]}")
             }
         } catch (e: Exception) {
             appendLog("  APDU异常: ${e.message}")
@@ -644,13 +695,13 @@ class MainActivity : AppCompatActivity() {
                 appendLog("  接触卡复位失败: $resetRet")
                 return false
             }
-            appendLog("  复位ATR: $resetRet")
+            appendLogScreen("  复位ATR: $resetRet")
             val randRet = BasicOper.dc_cpuapduInt_hex("0084000008")
             if (randRet.isNullOrBlank() || isError(randRet)) {
                 appendLog("  取随机数失败: $randRet")
                 return false
             }
-            appendLog("  随机数: $randRet")
+            appendLogScreen("  随机数: $randRet")
             true
         } catch (e: Exception) {
             appendLog("  接触CPU卡测试异常: ${e.message}")
@@ -665,11 +716,12 @@ class MainActivity : AppCompatActivity() {
             val count = etPingCount.text.toString().toIntOrNull() ?: 10
             var okCount = 0
             for (i in 1..count) {
+                checkPause()
                 if (!isRunning.get()) return false
                 val reachable = InetAddress.getByName(host).isReachable(3000)
                 if (reachable) okCount++
             }
-            appendLog("  PING $host: $okCount/$count 成功")
+            appendLogScreen("  PING $host: $okCount/$count 成功")
             okCount == count
         } catch (e: Exception) {
             appendLog("  以太网测试异常: ${e.message}")
@@ -689,7 +741,7 @@ class MainActivity : AppCompatActivity() {
             Thread.sleep(3000)
             handler.post { scanned = etBarcodeRef.text.toString().trim() }
             Thread.sleep(100)
-            appendLog("  扫码结果: $scanned | 样本: $ref")
+            appendLogScreen("  扫码结果: $scanned | 样本: $ref")
             scanned == ref
         } catch (e: Exception) {
             appendLog("  扫码测试异常: ${e.message}")
@@ -797,12 +849,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 写入文件 + 屏幕显示（摘要/结果行） */
     fun appendLog(msg: String) {
         val line = "[${sdf.format(Date())}] $msg"
-        // 写入文件（完整日志始终保留）
         try { currentLogFile?.appendText(line + "\n") } catch (_: Exception) {}
+        appendToScreen(line, msg)
+    }
 
-        // 检测新轮次开始（格式：─── 第 X / Y 轮 ───）
+    /** 仅屏幕显示（调试详情行，不写入历史日志文件） */
+    fun appendLogScreen(msg: String) {
+        val line = "[${sdf.format(Date())}] $msg"
+        appendToScreen(line, msg)
+    }
+
+    /** 共享的屏幕缓冲区逻辑 */
+    private fun appendToScreen(line: String, msg: String) {
         val isNewRound = msg.contains("─── 第") && msg.contains("轮 ───")
 
         synchronized(logRoundBuffers) {
@@ -895,14 +956,46 @@ class MainActivity : AppCompatActivity() {
         return up.startsWith("ERR") || up.startsWith("FFFE") || up.startsWith("FFFF")
     }
 
+    /**
+     * 阻塞当前（executor）线程直到恢复，或 isRunning 变为 false（停止时唤醒）
+     */
+    private fun checkPause() {
+        while (isPaused.get() && isRunning.get()) {
+            appendLogScreen("--- 测试已暂停 ---")
+            while (isPaused.get() && isRunning.get()) {
+                synchronized(pauseLock) {
+                    try {
+                        pauseLock.wait()
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                }
+            }
+            if (isRunning.get() && !isPaused.get()) {
+                appendLogScreen("--- 测试继续 ---")
+            }
+        }
+    }
+
     private fun setUIRunning(running: Boolean) {
-        btnStart.isEnabled = !running
+        btnStart.isEnabled = true   // 三态按钮：开始/暂停/继续，始终可点
         btnStop.isEnabled = running
         rgMode.isEnabled = !running
         etTotalCount.isEnabled = !running
         etStartDelay.isEnabled = !running
         tvStatus.text = if (running) "● 测试中" else "● 空闲"
         tvStatus.setTextColor(if (running) 0xFFFF8F00.toInt() else 0xFFA5D6A7.toInt())
+        if (running) {
+            btnStart.text = "暂停测试"
+            btnStart.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                android.graphics.Color.parseColor("#1565C0"))
+        } else {
+            btnStart.text = "开始测试"
+            btnStart.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                android.graphics.Color.parseColor("#1565C0"))
+            isPaused.set(false)
+        }
     }
 
     private fun updateCountUI() {
@@ -917,6 +1010,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         isRunning.set(false)
+        isPaused.set(false)
+        synchronized(pauseLock) { pauseLock.notifyAll() }
         closeReader()
         super.onDestroy()
     }
