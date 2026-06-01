@@ -5,8 +5,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
-# Build debug APK
+# 一键编译（推荐）
+./build.sh
+
+# 清理并编译
+./build.sh clean
+
+# 编译并安装到设备
+./build.sh install
+
+# 或直接使用 Gradle
 ./gradlew assembleDebug
+./gradlew installDebug
+./gradlew clean
+```
 
 # Build release APK
 ./gradlew assembleRelease
