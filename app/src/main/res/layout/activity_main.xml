@@ -250,6 +250,16 @@
 
             </LinearLayout>
 
+            <CheckBox
+                android:id="@+id/cbStopOnError"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:text="遇错停止（任一测试项失败即终止本轮及后续测试）"
+                android:textSize="13sp"
+                android:checked="false"
+                android:layout_marginTop="4dp"
+                android:paddingHorizontal="8dp" />
+
             <!-- ===== 扫码样本区 ===== -->
             <LinearLayout
                 android:id="@+id/layoutBarcodeInput"
@@ -267,14 +277,18 @@
                     android:textSize="14sp"
                     android:textColor="#E65100" />
                 <EditText
-                    android:id="@+id/etBarcodeRef"
+                    android:id="@+id/etBarcode"
                     android:layout_width="0dp"
                     android:layout_height="40dp"
                     android:layout_weight="1"
                     android:hint="请先扫描待测二维码..."
                     android:textSize="13sp"
                     android:background="@android:drawable/edit_text"
-                    android:layout_marginStart="8dp" />
+                    android:layout_marginStart="8dp"
+                    android:inputType="none"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:importantForAutofill="no" />
             </LinearLayout>
 
             <!-- ===== 控制按钮 ===== -->

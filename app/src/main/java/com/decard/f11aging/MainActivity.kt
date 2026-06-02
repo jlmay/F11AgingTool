@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.KeyEvent
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
@@ -49,8 +50,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cbContactCard: CheckBox
     private lateinit var cbEthernet: CheckBox
     private lateinit var cbBarcode: CheckBox
+    private lateinit var cbStopOnError: CheckBox
     private lateinit var layoutBarcodeInput: View
-    private lateinit var etBarcodeRef: EditText
+    private lateinit var etBarcode: EditText
     private lateinit var tvCurrentCount: TextView
     private lateinit var tvTotalCount: TextView
     private lateinit var tvSuccessCount: TextView
@@ -82,6 +84,9 @@ class MainActivity : AppCompatActivity() {
     private var currentCount = 0
     private var successCount = 0
     private var failCount = 0
+    private var barcodeSampleConfirmed = false
+    private val barcodeAutoConfirmHandler = Handler(Looper.getMainLooper())
+    private val barcodeAutoConfirmRunnable = Runnable { showBarcodeConfirmDialog(etBarcode.text.toString().trim()) }
 
     // 日志文件路径
     private val logDir by lazy {
@@ -108,7 +113,9 @@ class MainActivity : AppCompatActivity() {
     private val PREF_CB_CONTACT = "auto_cb_contact"
     private val PREF_CB_ETHERNET = "auto_cb_ethernet"
     private val PREF_CB_BARCODE = "auto_cb_barcode"
+    private val PREF_STOP_ON_ERROR = "auto_stop_on_error"
     private val PREF_BARCODE_REF = "auto_barcode_ref"
+    private val PREF_BARCODE_CONFIRMED = "auto_barcode_confirmed"
     private val PREF_LOG_FILE = "auto_log_file"     // 日志文件绝对路径
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -138,8 +145,9 @@ class MainActivity : AppCompatActivity() {
         cbContactCard = findViewById(R.id.cbContactCard)
         cbEthernet = findViewById(R.id.cbEthernet)
         cbBarcode = findViewById(R.id.cbBarcode)
+        cbStopOnError = findViewById(R.id.cbStopOnError)
         layoutBarcodeInput = findViewById(R.id.layoutBarcodeInput)
-        etBarcodeRef = findViewById(R.id.etBarcodeRef)
+        etBarcode = findViewById(R.id.etBarcode)
         tvCurrentCount = findViewById(R.id.tvCurrentCount)
         tvTotalCount = findViewById(R.id.tvTotalCount)
         tvSuccessCount = findViewById(R.id.tvSuccessCount)
@@ -157,7 +165,40 @@ class MainActivity : AppCompatActivity() {
     private fun setupListeners() {
         cbBarcode.setOnCheckedChangeListener { _, checked ->
             layoutBarcodeInput.visibility = if (checked) View.VISIBLE else View.GONE
+            if (checked) {
+                // 如果已有已确认的样本码（模式2重启恢复），不重置
+                if (!barcodeSampleConfirmed) {
+                    etBarcode.isEnabled = true
+                    etBarcode.text = null
+                    etBarcode.text.clear()
+                    etBarcode.requestFocus()
+                }
+            } else {
+                barcodeSampleConfirmed = false
+            }
         }
+
+        // 扫码样本自动确认：收到回车 或 300ms 无新数据 → 弹窗确认
+        etBarcode.setOnKeyListener { v: View, keyCode: Int, event: KeyEvent ->
+            if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_ENTER) {
+                val text = etBarcode.text.toString().trim()
+                if (text.isNotEmpty() && !barcodeSampleConfirmed) {
+                    showBarcodeConfirmDialog(text)
+                }
+                true
+            } else false
+        }
+        etBarcode.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (barcodeSampleConfirmed) return
+                barcodeAutoConfirmHandler.removeCallbacks(barcodeAutoConfirmRunnable)
+                if (s != null && s.isNotEmpty()) {
+                    barcodeAutoConfirmHandler.postDelayed(barcodeAutoConfirmRunnable, 50)
+                }
+            }
+        })
 
         btnStart.setOnClickListener {
             when {
@@ -198,16 +239,23 @@ class MainActivity : AppCompatActivity() {
             putBoolean(PREF_CB_CONTACT, cbContactCard.isChecked)
             putBoolean(PREF_CB_ETHERNET, cbEthernet.isChecked)
             putBoolean(PREF_CB_BARCODE, cbBarcode.isChecked)
-            putString(PREF_BARCODE_REF, etBarcodeRef.text.toString())
+            putBoolean(PREF_STOP_ON_ERROR, cbStopOnError.isChecked)
+            putString(PREF_BARCODE_REF, etBarcode.text.toString())
+            putBoolean(PREF_BARCODE_CONFIRMED, barcodeSampleConfirmed)
             putString(PREF_LOG_FILE, currentLogFile?.absolutePath ?: "")
             apply()
         }
     }
 
-    /** 清除自动模式标志（测试完成或手动停止时调用） */
+    /** 清除自动模式标志和所有测试状态（测试完成或手动停止时调用） */
     private fun clearAutoState() {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putBoolean(PREF_AUTO_MODE, false)
+            .putInt(PREF_REMAINING, 0)
+            .putInt(PREF_TOTAL, 0)
+            .putInt(PREF_CURRENT, 0)
+            .putInt(PREF_SUCCESS, 0)
+            .putInt(PREF_FAIL, 0)
             .putString(PREF_LOG_FILE, "")
             .apply()
     }
@@ -225,12 +273,12 @@ class MainActivity : AppCompatActivity() {
         // 剩余为0，任务已完成
         if (remaining <= 0) {
             clearAutoState()
-            appendLog("[恢复] 所有测试已完成")
+            appendLogScreen("[恢复] 所有测试已完成")
             return
         }
 
         val modeName = if (runMode == 2) "模式2(每次重启)" else "模式1(不断电)"
-        appendLog("[恢复] 开机检测到未完成测试，模式=$modeName，剩余 $remaining/$total 次")
+        appendLogScreen("[恢复] 开机检测到未完成测试，模式=$modeName，剩余 $remaining/$total 次")
 
         // 恢复计数器
         currentCount = prefs.getInt(PREF_CURRENT, 0)
@@ -254,8 +302,13 @@ class MainActivity : AppCompatActivity() {
         cbContactlessCard.isChecked = prefs.getBoolean(PREF_CB_CONTACTLESS, false)
         cbContactCard.isChecked = prefs.getBoolean(PREF_CB_CONTACT, false)
         cbEthernet.isChecked = prefs.getBoolean(PREF_CB_ETHERNET, true)
+        // 先恢复扫码样本相关数据，再设置 cbBarcode（避免其 listener 触发清空文本）
+        barcodeSampleConfirmed = prefs.getBoolean(PREF_BARCODE_CONFIRMED, false)
+        etBarcode.setText(prefs.getString(PREF_BARCODE_REF, ""))
         cbBarcode.isChecked = prefs.getBoolean(PREF_CB_BARCODE, false)
-        etBarcodeRef.setText(prefs.getString(PREF_BARCODE_REF, ""))
+        if (barcodeSampleConfirmed) etBarcode.isEnabled = false
+        // 恢复 cbStopOnError（需要放在所有 cb 之后）
+        cbStopOnError.isChecked = prefs.getBoolean(PREF_STOP_ON_ERROR, false)
         etPingHost.setText(prefs.getString(PREF_PING_HOST, "www.baidu.com"))
         etPingCount.setText(prefs.getString(PREF_PING_COUNT, "10"))
 
@@ -277,7 +330,7 @@ class MainActivity : AppCompatActivity() {
             currentLogFile = File(logDir, "aging_${ts}.txt")
         }
         val ts = sdf.format(Date())
-        appendLog("\n====== 恢复测试 [$ts] ======")
+        appendLogScreen("\n====== 恢复测试 [$ts] ======")
 
         isRunning.set(true)
         setUIRunning(true)
@@ -323,8 +376,8 @@ class MainActivity : AppCompatActivity() {
         val hasTasks = cbIdCard.isChecked || cbContactlessCard.isChecked ||
                 cbContactCard.isChecked || cbEthernet.isChecked || cbBarcode.isChecked
         if (!hasTasks) { toast("请至少勾选一个测试项"); return }
-        if (cbBarcode.isChecked && etBarcodeRef.text.toString().isBlank()) {
-            toast("请先扫描样本二维码再开始测试"); return
+        if (cbBarcode.isChecked && !barcodeSampleConfirmed) {
+            toast("请先扫码并确认样本二维码再开始测试"); return
         }
 
         // 保存初始状态（模式1也保存，以防断电恢复）
@@ -497,37 +550,43 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 执行一轮所有勾选的测试项，全部成功返回 true */
+    /** 遇错停止检查：勾选后任一测试项失败即终止测试 */
+    private fun checkStopOnError() {
+        if (getCheckedFlag(cbStopOnError)) {
+            isRunning.set(false)
+            appendLog("====== 遇错停止测试 ======")
+            clearAutoState()
+        }
+    }
+
+    /** 执行一轮所有勾选的测试项，全部成功返回 true */
     private fun runOnce(): Boolean {
         var allOk = true
 
         if (getCheckedFlag(cbIdCard)) {
             val ok = testIdCard()
-            if (ok) appendLogScreen("身份证: ✓ 成功") else appendLog("身份证: ✗ 失败")
-            if (!ok) allOk = false
+            if (ok) appendLogScreen("身份证: ✓ 成功") else { appendLog("身份证: ✗ 失败"); allOk = false; checkStopOnError(); if (!isRunning.get()) return false }
+            checkPause(); if (!isRunning.get()) return false
         }
-        checkPause()
         if (getCheckedFlag(cbContactlessCard)) {
             val ok = testContactlessCard()
-            if (ok) appendLogScreen("非接触CPU卡: ✓ 成功") else appendLog("非接触CPU卡: ✗ 失败")
-            if (!ok) allOk = false
+            if (ok) appendLogScreen("非接触CPU卡: ✓ 成功") else { appendLog("非接触CPU卡: ✗ 失败"); allOk = false; checkStopOnError(); if (!isRunning.get()) return false }
+            checkPause(); if (!isRunning.get()) return false
         }
-        checkPause()
         if (getCheckedFlag(cbContactCard)) {
             val ok = testContactCard()
-            if (ok) appendLogScreen("接触CPU卡: ✓ 成功") else appendLog("接触CPU卡: ✗ 失败")
-            if (!ok) allOk = false
+            if (ok) appendLogScreen("接触CPU卡: ✓ 成功") else { appendLog("接触CPU卡: ✗ 失败"); allOk = false; checkStopOnError(); if (!isRunning.get()) return false }
+            checkPause(); if (!isRunning.get()) return false
         }
-        checkPause()
         if (getCheckedFlag(cbEthernet)) {
             val ok = testEthernet()
-            if (ok) appendLogScreen("以太网PING: ✓ 成功") else appendLog("以太网PING: ✗ 失败")
-            if (!ok) allOk = false
+            if (ok) appendLogScreen("以太网PING: ✓ 成功") else { appendLog("以太网PING: ✗ 失败"); allOk = false; checkStopOnError(); if (!isRunning.get()) return false }
+            checkPause(); if (!isRunning.get()) return false
         }
-        checkPause()
         if (getCheckedFlag(cbBarcode)) {
             val ok = testBarcode()
-            if (ok) appendLogScreen("扫码: ✓ 成功") else appendLog("扫码: ✗ 失败")
-            if (!ok) allOk = false
+            if (ok) appendLogScreen("扫码: ✓ 成功") else { appendLog("扫码: ✗ 失败"); allOk = false; checkStopOnError(); if (!isRunning.get()) return false }
+            checkPause(); if (!isRunning.get()) return false
         }
 
         if (allOk) appendLogScreen("本轮结果: 【全部成功】") else appendLog("本轮结果: 【有失败项】")
@@ -729,20 +788,115 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 扫码样本确认弹窗 */
+    private fun showBarcodeConfirmDialog(scanned: String) {
+        // 已确认样本时不重复弹窗（避免开机恢复时残留的延时任务触发）
+        if (barcodeSampleConfirmed) return
+        barcodeAutoConfirmHandler.removeCallbacks(barcodeAutoConfirmRunnable)
+        handler.post {
+            AlertDialog.Builder(this)
+                .setTitle("样本码确认")
+                .setMessage("检测到样本码：\n$scanned\n\n确认使用此样本码进行扫码测试？")
+                .setPositiveButton("确认") { _, _ ->
+                    barcodeSampleConfirmed = true
+                    etBarcode.setText(scanned)
+                    etBarcode.isEnabled = false
+                    toast("样本码已确认")
+                }
+                .setNegativeButton("取消") { _, _ ->
+                    barcodeAutoConfirmHandler.removeCallbacks(barcodeAutoConfirmRunnable)
+                    barcodeSampleConfirmed = false
+                    // 先禁用编辑框阻止扫码枪残余按键输入，再清空文本
+                    etBarcode.isEnabled = false
+                    etBarcode.text.clear()
+                    // 等残余按键排空后再恢复（500ms 足以消化按键重复）
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        etBarcode.isEnabled = true
+                        etBarcode.requestFocus()
+                    }, 500)
+                    // 测试运行时取消确认 → 终止测试（无样本无法继续）
+                    if (isRunning.get()) {
+                        isRunning.set(false)
+                        synchronized(pauseLock) { pauseLock.notifyAll() }
+                        clearAutoState()
+                        appendLog("====== 因取消样本二维码确认，测试终止 ======")
+                        setUIRunning(false)
+                    }
+                }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    /** 跨线程读取 EditText 文本 */
+    private fun readEditText(et: EditText): String {
+        var text = ""
+        val latch = java.util.concurrent.CountDownLatch(1)
+        handler.post { text = et.text.toString(); latch.countDown() }
+        try { latch.await() } catch (_: InterruptedException) {}
+        return text.trim()
+    }
+
     private fun testBarcode(): Boolean {
+        val sample = etBarcode.text.toString().trim()
+        if (sample.isBlank() || !barcodeSampleConfirmed) {
+            appendLogScreen("  无有效样本二维码（未配置或未确认），扫码测试失败")
+            // 无有效样本时无条件终止测试（防止模式2无限重启循环）
+            isRunning.set(false)
+            synchronized(pauseLock) { pauseLock.notifyAll() }
+            clearAutoState()
+            appendLog("====== 因无有效样本二维码终止测试 ======")
+            handler.post { setUIRunning(false) }
+            return false
+        }
         return try {
-            val ref = etBarcodeRef.text.toString().trim()
-            if (ref.isBlank()) {
-                appendLog("  未设置样本二维码")
+            // 清空编辑框，抑制软键盘，获取焦点等待扫码
+            handler.post {
+                etBarcode.isEnabled = true
+                etBarcode.showSoftInputOnFocus = false
+                etBarcode.inputType = android.text.InputType.TYPE_NULL
+                etBarcode.text.clear()
+                etBarcode.requestFocus()
+            }
+            Thread.sleep(300)
+
+            // 再清空一次，排空确认弹窗期间扫码枪可能的残余按键输入
+            handler.post { etBarcode.text.clear() }
+            Thread.sleep(100)
+
+            // 轮询等待扫码数据，200ms 文本无变化即认为接收完毕，10s 无数据则超时
+            var scanned = ""
+            var lastText = ""
+            var lastChangeTime = 0L
+            val startTime = System.currentTimeMillis()
+            val DATA_TIMEOUT = 10000L
+            val STABLE_MS = 200L
+            while (isRunning.get()) {
+                Thread.sleep(50)
+                val current = readEditText(etBarcode)
+                val now = System.currentTimeMillis()
+                if (current.isNotEmpty()) {
+                    if (current != lastText) {
+                        lastText = current
+                        lastChangeTime = now
+                    } else if (now - lastChangeTime >= STABLE_MS) {
+                        scanned = current
+                        break
+                    }
+                } else if (now - startTime >= DATA_TIMEOUT) {
+                    break
+                }
+            }
+
+            handler.post { etBarcode.isEnabled = false }
+
+            if (scanned.isEmpty()) {
+                appendLog("  扫码超时，未检测到扫码数据")
                 return false
             }
-            var scanned = ""
-            handler.post { etBarcodeRef.requestFocus() }
-            Thread.sleep(3000)
-            handler.post { scanned = etBarcodeRef.text.toString().trim() }
-            Thread.sleep(100)
-            appendLogScreen("  扫码结果: $scanned | 样本: $ref")
-            scanned == ref
+
+            appendLogScreen("  扫码结果: $scanned | 样本: $sample")
+            scanned == sample
         } catch (e: Exception) {
             appendLog("  扫码测试异常: ${e.message}")
             false
