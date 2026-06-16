@@ -337,12 +337,7 @@ class MainActivity : AppCompatActivity() {
         updateNetworkInfo()
 
         executor.submit { openReader() }
-        val delay = etStartDelay.text.toString().toLongOrNull() ?: 0L
         executor.submit {
-            if (delay > 0) {
-                appendLogScreen("等待启动延时 ${delay}ms ...")
-                Thread.sleep(delay)
-            }
             continueTestLoop(remaining, total, runMode)
         }
     }
@@ -410,12 +405,7 @@ class MainActivity : AppCompatActivity() {
         updateNetworkInfo()
 
         executor.submit { openReader() }
-        val delay = etStartDelay.text.toString().toLongOrNull() ?: 0L
         executor.submit {
-            if (delay > 0) {
-                appendLogScreen("等待启动延时 ${delay}ms ...")
-                Thread.sleep(delay)
-            }
             if (isRebootMode) {
                 // 模式2：只跑一轮，然后重启
                 runSingleRoundAndReboot(roundIndex = 1, remaining = total)
@@ -478,6 +468,15 @@ class MainActivity : AppCompatActivity() {
 
             // 每轮后保存状态（断电恢复用）
             saveState(remaining = total - i, runMode = runMode)
+
+            // 轮间延时（每轮结束后等待，控制测试节奏）
+            if (i < total && isRunning.get()) {
+                val delay = readEditText(etStartDelay).toLongOrNull() ?: 0L
+                if (delay > 0) {
+                    appendLogScreen("轮间延时 ${delay}ms ...")
+                    Thread.sleep(delay)
+                }
+            }
         }
 
         if (isRunning.get()) {
@@ -533,7 +532,12 @@ class MainActivity : AppCompatActivity() {
         // 还有剩余次数，重启继续
         appendLogScreen("[模式2] 本轮完成，剩余 $newRemaining 次，准备重启系统...")
         closeReader()
-        Thread.sleep(2000)
+        // 轮间延时（重启前等待）
+        val rebootDelay = readEditText(etStartDelay).toLongOrNull() ?: 2000L
+        if (rebootDelay > 0) {
+            appendLogScreen("重启前等待 ${rebootDelay}ms ...")
+            Thread.sleep(rebootDelay)
+        }
         rebootDevice()
     }
 
