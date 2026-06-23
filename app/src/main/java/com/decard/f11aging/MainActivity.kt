@@ -265,6 +265,21 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(PREF_AUTO_MODE, false)) return
 
+        // === 逃生通道：检测外部停止标记目录 ===
+        // 当模式2（每轮重启）陷入死循环时，可通过 adb 创建此目录来终止：
+        //   adb shell mkdir /sdcard/stop
+        // 下次程序启动时检测到该目录，自动清除状态并停止自动恢复。
+        try {
+            val stopDir = File("/sdcard/stop")
+            if (stopDir.exists() && stopDir.isDirectory) {
+                appendLogScreen("[恢复] 检测到停止标记目录 (/sdcard/stop)")
+                appendLogScreen("[恢复] 已清除自动恢复状态，测试终止")
+                clearAutoState()
+                stopDir.delete()
+                return
+            }
+        } catch (_: Exception) {}
+
         val remaining = prefs.getInt(PREF_REMAINING, 0)
         val total = prefs.getInt(PREF_TOTAL, 0)
         val runMode = prefs.getInt(PREF_RUN_MODE, 1)
@@ -920,33 +935,31 @@ class MainActivity : AppCompatActivity() {
         // 方式1：DevicePolicyManager（需通过 adb 设为设备所有者）
         if (deviceOwnerReboot()) return
 
-        // 方式2：shell su reboot（需要 root）
+        // 方式2：svc power reboot（不需 root，部分设备可用）
+        if (svcPowerReboot()) return
+
+        // 方式3：直接 reboot 命令（使用完整路径）
+        try {
+            Runtime.getRuntime().exec("/system/bin/reboot")
+            return
+        } catch (_: Exception) {}
+
+        // 方式4：shell su reboot（需要 root）
         if (shellReboot()) return
 
-        // 方式3：PowerManager API（需要系统签名 APK）
+        // 方式5：PowerManager API（需要系统签名 APK）
         try {
             val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
             pm.reboot(null)
             return
         } catch (_: Exception) {}
 
-        // 方式4：直接 reboot 命令
-        try {
-            Runtime.getRuntime().exec(arrayOf("reboot"))
-            return
-        } catch (_: Exception) {}
-
         appendLog("[模式2] ⚠ 自动重启失败（无root/系统签名/设备所有者权限）")
-        appendLog("[模式2] 降级为不断电循环模式继续测试")
-
-        // 降级：直接继续下一轮循环（不重启系统）
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val remaining = prefs.getInt(PREF_REMAINING, 0)
-        val total = prefs.getInt(PREF_TOTAL, 0)
-        if (remaining > 0) {
-            appendLog("[模式2] 继续第 ${currentCount + 1} 轮（无重启）")
-            continueTestLoop(remaining, total, runMode = 1)
-        }
+        appendLog("[模式2] 清除自动恢复状态，停止测试")
+        clearAutoState()
+        closeReader()
+        isRunning.set(false)
+        handler.post { setUIRunning(false) }
     }
 
     /** 通过 DevicePolicyManager 重启（需设备所有者权限） */
@@ -954,7 +967,25 @@ class MainActivity : AppCompatActivity() {
         return try {
             val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
             dpm.reboot(android.content.ComponentName(this, DeviceAdminReceiver::class.java))
-            true
+            // 若设备实际重启，进程在此行之前已被杀死，不会继续执行
+            // 等待5秒确认：如果代码继续运行，说明API返回成功但设备未重启（部分厂商ROM空实现）
+            Thread.sleep(5000)
+            appendLog("[重启] DevicePolicyManager.reboot() 调用成功但设备未重启（厂商ROM兼容问题）")
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** 尝试通过 svc power reboot 重启（部分设备 shell 用户可用） */
+    private fun svcPowerReboot(): Boolean {
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", "svc power reboot"))
+            val exitCode = process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)
+            // 若重启成功，进程会被杀死，不会返回 exitCode
+            Thread.sleep(3000)
+            appendLog("[重启] svc power reboot 命令执行完毕但设备未重启")
+            false
         } catch (_: Exception) {
             false
         }
